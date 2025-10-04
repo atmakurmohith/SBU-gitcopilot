@@ -1,0 +1,9 @@
+# Copy this file to terraform.tfvars and customize values before running
+
+location            = "eastus"
+resource_group_name = "rg-demo-terraform"
+name_prefix         = "demo"
+vnet_address_space  = "10.0.0.0/16"
+subnet_prefix       = "10.0.1.0/24"
+storage_tier        = "Standard"
+storage_replication = "LRS"
