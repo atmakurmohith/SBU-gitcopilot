@@ -51,21 +51,29 @@ jobs:
 
       - name: Prepare Terraform variables
         run: |
-          echo "vm_type=${{ github.event.inputs.vm_type }}" >> terraform.tfvars
-          echo "create_vm=$(if [ '${{ github.event.inputs.vm_type }}' = 'none' ]; then echo false; else echo true; fi)" >> terraform.tfvars
-          echo "vm_admin_username=azureuser" >> terraform.tfvars
+          # compute create_vm boolean
+          create_vm=$(if [ "${{ github.event.inputs.vm_type }}" = "none" ]; then echo false; else echo true; fi)
+
+          # Write main variables with correct HCL formatting (strings quoted, booleans unquoted)
+          cat > terraform.tfvars <<EOF
+vm_type = "${{ github.event.inputs.vm_type }}"
+create_vm = ${create_vm}
+vm_admin_username = "azureuser"
+EOF
+
           # For Linux VMs, expect SSH public key in the repo secret or variable
           if [ "${{ github.event.inputs.vm_type }}" = "linux" ] || [ "${{ github.event.inputs.vm_type }}" = "redhat" ]; then
             if [ -n "${{ secrets.VM_SSH_PUBLIC_KEY }}" ]; then
-              echo "vm_ssh_public_key=${{ secrets.VM_SSH_PUBLIC_KEY }}" >> terraform.tfvars
+              echo "vm_ssh_public_key = \"${{ secrets.VM_SSH_PUBLIC_KEY }}\"" >> terraform.tfvars
             else
               echo "Warning: VM_SSH_PUBLIC_KEY secret not set; plan/apply may fail for SSH-based VMs"
             fi
           fi
+
           # For Windows VMs, expect a password in secrets
           if [ "${{ github.event.inputs.vm_type }}" = "windows" ]; then
             if [ -n "${{ secrets.VM_ADMIN_PASSWORD }}" ]; then
-              echo "vm_admin_password=${{ secrets.VM_ADMIN_PASSWORD }}" >> terraform.tfvars
+              echo "vm_admin_password = \"${{ secrets.VM_ADMIN_PASSWORD }}\"" >> terraform.tfvars
             else
               echo "Warning: VM_ADMIN_PASSWORD secret not set; apply may fail for Windows VM"
             fi
