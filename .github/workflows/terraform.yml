@@ -1,0 +1,98 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Terraform operation to run'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      vm_type:
+        description: 'Type of VM to create'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - linux
+          - windows
+          - redhat
+      auto_approve:
+        description: 'Auto-approve terraform apply/destroy (true/false)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Prepare Terraform variables
+        run: |
+          echo "vm_type=${{ github.event.inputs.vm_type }}" >> terraform.tfvars
+          echo "create_vm=$(if [ '${{ github.event.inputs.vm_type }}' = 'none' ]; then echo false; else echo true; fi)" >> terraform.tfvars
+          echo "vm_admin_username=azureuser" >> terraform.tfvars
+          # For Linux VMs, expect SSH public key in the repo secret or variable
+          if [ "${{ github.event.inputs.vm_type }}" = "linux" ] || [ "${{ github.event.inputs.vm_type }}" = "redhat" ]; then
+            if [ -n "${{ secrets.VM_SSH_PUBLIC_KEY }}" ]; then
+              echo "vm_ssh_public_key=${{ secrets.VM_SSH_PUBLIC_KEY }}" >> terraform.tfvars
+            else
+              echo "Warning: VM_SSH_PUBLIC_KEY secret not set; plan/apply may fail for SSH-based VMs"
+            fi
+          fi
+          # For Windows VMs, expect a password in secrets
+          if [ "${{ github.event.inputs.vm_type }}" = "windows" ]; then
+            if [ -n "${{ secrets.VM_ADMIN_PASSWORD }}" ]; then
+              echo "vm_admin_password=${{ secrets.VM_ADMIN_PASSWORD }}" >> terraform.tfvars
+            else
+              echo "Warning: VM_ADMIN_PASSWORD secret not set; apply may fail for Windows VM"
+            fi
+          fi
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.operation == 'plan' || github.event.inputs.operation == 'apply' }}
+        run: |
+          terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: ${{ github.event.inputs.operation == 'apply' }}
+        run: |
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform apply -auto-approve tfplan
+          else
+            terraform apply tfplan
+          fi
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.operation == 'destroy' }}
+        run: |
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform destroy -auto-approve -var "vm_type=${{ github.event.inputs.vm_type }}"
+          else
+            terraform destroy -var "vm_type=${{ github.event.inputs.vm_type }}"
+          fi
