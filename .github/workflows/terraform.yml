@@ -1,0 +1,143 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, test, uat, prod]
+        default: dev
+      action:
+        description: 'Terraform action'
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+      create_vm:
+        description: 'Whether to create a VM'
+        required: true
+        type: choice
+        options: ['true','false']
+        default: 'false'
+      vm_os:
+        description: 'OS for the VM'
+        required: true
+        type: choice
+        options: [none, ubuntu, redhat, windows]
+        default: none
+      vm_size:
+        description: 'VM size'
+        required: true
+        type: string
+        default: Standard_B1s
+      auto_approve:
+        description: 'Auto-approve terraform apply/destroy (true/false)'
+        required: false
+        type: choice
+        options: ['true','false']
+        default: 'false'
+
+  push:
+    branches:
+      - feature/**
+      - feature/terraform-initialcode
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform (${{ github.event.inputs.environment }} - ${{ github.event.inputs.action }})
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    env:
+      TF_VAR_admin_password: ${{ secrets.ADMIN_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Export ARM env for Terraform (OIDC)
+        run: |
+          echo "ARM_USE_OIDC=true" >> $GITHUB_ENV
+          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+
+      - name: Prepare terraform.tfvars
+        run: |
+          # convert create_vm input to boolean
+          if [ "${{ github.event.inputs.create_vm }}" = "true" ]; then
+            create_vm=true
+          else
+            create_vm=false
+          fi
+
+          vm_os="${{ github.event.inputs.vm_os }}"
+          vm_size="${{ github.event.inputs.vm_size }}"
+
+          cat > terraform.tfvars <<EOF
+create_vm = ${create_vm}
+vm_type = "${vm_os}"
+vm_size = "${vm_size}"
+vm_admin_username = "azureuser"
+EOF
+
+          if [ "$vm_os" = "ubuntu" ] || [ "$vm_os" = "redhat" ]; then
+            if [ -n "${{ secrets.VM_SSH_PUBLIC_KEY }}" ]; then
+              echo "vm_ssh_public_key = \"${{ secrets.VM_SSH_PUBLIC_KEY }}\"" >> terraform.tfvars
+            else
+              echo "Warning: VM_SSH_PUBLIC_KEY secret not set; SSH-based VMs may fail"
+            fi
+          fi
+
+          if [ "$vm_os" = "windows" ]; then
+            if [ -n "${{ secrets.ADMIN_PASSWORD }}" ]; then
+              echo "vm_admin_password = \"${{ secrets.ADMIN_PASSWORD }}\"" >> terraform.tfvars
+            else
+              echo "Warning: ADMIN_PASSWORD secret not set; Windows VM creation may fail"
+            fi
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        if: ${{ github.event.inputs.action == 'plan' }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform apply -auto-approve tfplan
+          else
+            terraform apply tfplan
+          fi
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: |
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform destroy -auto-approve -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
+          else
+            terraform destroy -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
+          fi
