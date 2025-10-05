@@ -4,6 +4,119 @@ on:
   workflow_dispatch:
     inputs:
       environment:
+        description: 'Target environment folder under envs/'
+        required: true
+        default: 'dev'
+      operation:
+        description: 'Terraform operation to run'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      vm_os:
+        description: 'OS of the VM to create (none = no vm)'
+        required: true
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - ubuntu
+          - redhat
+          - windows
+      vm_size:
+        description: 'VM size'
+        required: false
+        default: 'Standard_B1s'
+      auto_approve:
+        description: 'Auto-approve apply/destroy (true/false)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.7'
+
+      - name: Prepare environment files
+        run: |
+          set -euo pipefail
+          ENV_DIR="envs/${{ inputs.environment }}"
+          mkdir -p "$ENV_DIR"
+
+          # create backend.hcl if missing
+          if [ ! -f "$ENV_DIR/backend.hcl" ]; then
+            cat > "$ENV_DIR/backend.hcl" <<EOF
+# Local backend for demo/testing - replace with remote backend in production
+path = "terraform.tfstate"
+EOF
+          fi
+
+          # compute create_vm boolean based on vm_os input
+          if [ "${{ inputs.vm_os }}" = "none" ]; then
+            CREATE_VM=false
+          else
+            CREATE_VM=true
+          fi
+
+          # write terraform.tfvars with correct HCL formatting
+          cat > "$ENV_DIR/terraform.tfvars" <<EOF
+location = "eastus"
+resource_group_name = "rg-${{ inputs.environment }}-gitcopilot"
+create_vm = ${CREATE_VM}
+vm_os = "${{ inputs.vm_os }}"
+vm_size = "${{ inputs.vm_size }}"
+EOF
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        run: terraform -chdir="envs/${{ inputs.environment }}" init -backend-config="backend.hcl"
+
+      - name: Terraform Plan
+        if: ${{ inputs.operation == 'plan' || inputs.operation == 'apply' }}
+        run: terraform -chdir="envs/${{ inputs.environment }}" plan -out=tfplan
+
+      - name: Terraform Apply
+        if: ${{ inputs.operation == 'apply' }}
+        run: |
+          if [ "${{ inputs.auto_approve }}" = "true" ]; then
+            terraform -chdir="envs/${{ inputs.environment }}" apply -auto-approve tfplan
+          else
+            terraform -chdir="envs/${{ inputs.environment }}" apply tfplan
+          fi
+
+      - name: Terraform Destroy
+        if: ${{ inputs.operation == 'destroy' }}
+        run: |
+          if [ "${{ inputs.auto_approve }}" = "true" ]; then
+            terraform -chdir="envs/${{ inputs.environment }}" destroy -auto-approve
+          else
+            terraform -chdir="envs/${{ inputs.environment }}" destroy
+          fi
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
         description: 'Target environment'
         required: true
         type: choice
@@ -49,7 +162,6 @@ on:
       - main
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -65,19 +177,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
-        uses: azure/login@v2
+      - name: Azure Login (service principal)
+        uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Export ARM env for Terraform (OIDC)
-        run: |
-          echo "ARM_USE_OIDC=true" >> $GITHUB_ENV
-          echo "ARM_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $GITHUB_ENV
-          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
-          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Prepare terraform.tfvars
         run: |
@@ -91,7 +194,10 @@ jobs:
           vm_os="${{ github.event.inputs.vm_os }}"
           vm_size="${{ github.event.inputs.vm_size }}"
 
-          cat > terraform.tfvars <<EOF
+          ENV_DIR="envs/${{ github.event.inputs.environment }}"
+          mkdir -p "$ENV_DIR"
+
+          cat > "$ENV_DIR/terraform.tfvars" <<EOF
 create_vm = ${create_vm}
 vm_type = "${vm_os}"
 vm_size = "${vm_size}"
@@ -100,7 +206,7 @@ EOF
 
           if [ "$vm_os" = "ubuntu" ] || [ "$vm_os" = "redhat" ]; then
             if [ -n "${{ secrets.VM_SSH_PUBLIC_KEY }}" ]; then
-              echo "vm_ssh_public_key = \"${{ secrets.VM_SSH_PUBLIC_KEY }}\"" >> terraform.tfvars
+              echo "vm_ssh_public_key = \"${{ secrets.VM_SSH_PUBLIC_KEY }}\"" >> "$ENV_DIR/terraform.tfvars"
             else
               echo "Warning: VM_SSH_PUBLIC_KEY secret not set; SSH-based VMs may fail"
             fi
@@ -108,7 +214,7 @@ EOF
 
           if [ "$vm_os" = "windows" ]; then
             if [ -n "${{ secrets.ADMIN_PASSWORD }}" ]; then
-              echo "vm_admin_password = \"${{ secrets.ADMIN_PASSWORD }}\"" >> terraform.tfvars
+              echo "vm_admin_password = \"${{ secrets.ADMIN_PASSWORD }}\"" >> "$ENV_DIR/terraform.tfvars"
             else
               echo "Warning: ADMIN_PASSWORD secret not set; Windows VM creation may fail"
             fi
@@ -118,26 +224,32 @@ EOF
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          ENV_DIR="envs/${{ github.event.inputs.environment }}"
+          terraform -chdir="$ENV_DIR" init -backend-config="backend.hcl"
 
       - name: Terraform Plan
         if: ${{ github.event.inputs.action == 'plan' }}
-        run: terraform plan -out=tfplan
+        run: |
+          ENV_DIR="envs/${{ github.event.inputs.environment }}"
+          terraform -chdir="$ENV_DIR" plan -var-file="terraform.tfvars" -out=tfplan
 
       - name: Terraform Apply
         if: ${{ github.event.inputs.action == 'apply' }}
         run: |
+          ENV_DIR="envs/${{ github.event.inputs.environment }}"
           if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
-            terraform apply -auto-approve tfplan
+            terraform -chdir="$ENV_DIR" apply -auto-approve tfplan
           else
-            terraform apply tfplan
+            terraform -chdir="$ENV_DIR" apply tfplan
           fi
 
       - name: Terraform Destroy
         if: ${{ github.event.inputs.action == 'destroy' }}
         run: |
+          ENV_DIR="envs/${{ github.event.inputs.environment }}"
           if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
-            terraform destroy -auto-approve -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
+            terraform -chdir="$ENV_DIR" destroy -auto-approve -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
           else
-            terraform destroy -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
+            terraform -chdir="$ENV_DIR" destroy -var "create_vm=${{ github.event.inputs.create_vm }}" -var "vm_type=${{ github.event.inputs.vm_os }}"
           fi
