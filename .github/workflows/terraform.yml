@@ -4,112 +4,111 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Target environment folder under envs/'
+        description: 'Target environment (dev/test/uat/prod)'
         required: true
-        default: 'dev'
+        type: choice
+        options: [dev, test, uat, prod]
+        default: dev
       operation:
-        description: 'Terraform operation to run'
+        description: 'Terraform operation (plan/apply/destroy)'
         required: true
-        default: 'plan'
         type: choice
-        options:
-          - plan
-          - apply
-          - destroy
+        options: [plan, apply, destroy]
+        default: plan
       vm_os:
-        description: 'OS of the VM to create (none = no vm)'
+        description: 'VM OS (none/ubuntu/redhat/windows)'
         required: true
-        default: 'none'
         type: choice
-        options:
-          - none
-          - ubuntu
-          - redhat
-          - windows
+        options: [none, ubuntu, redhat, windows]
+        default: none
       vm_size:
         description: 'VM size'
         required: false
-        default: 'Standard_B1s'
+        default: Standard_B1s
       auto_approve:
         description: 'Auto-approve apply/destroy (true/false)'
         required: false
-        default: 'false'
         type: choice
-        options:
-          - 'true'
-          - 'false'
+        options: ['true','false']
+        default: 'false'
 
 jobs:
   terraform:
     runs-on: ubuntu-latest
+    name: Terraform ( ${{ github.event.inputs.environment }} - ${{ github.event.inputs.operation }} )
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: '1.5.7'
 
-      - name: Prepare environment files
+      - name: Prepare env files
+        shell: bash
         run: |
           set -euo pipefail
-          ENV_DIR="envs/${{ inputs.environment }}"
+          ENV="${{ github.event.inputs.environment }}"
+          ENV_DIR="envs/$ENV"
           mkdir -p "$ENV_DIR"
 
-          # create backend.hcl if missing
+          # write backend.hcl if missing
           if [ ! -f "$ENV_DIR/backend.hcl" ]; then
-            cat > "$ENV_DIR/backend.hcl" <<EOF
-# Local backend for demo/testing - replace with remote backend in production
-path = "terraform.tfstate"
-EOF
+            printf '%s\n%s\n' '# Local backend for demo/testing - replace with remote backend in production' 'path = "terraform.tfstate"' > "$ENV_DIR/backend.hcl"
           fi
 
-          # compute create_vm boolean based on vm_os input
-          if [ "${{ inputs.vm_os }}" = "none" ]; then
-            CREATE_VM=false
-          else
-            CREATE_VM=true
+          VM_OS="${{ github.event.inputs.vm_os }}"
+          VM_SIZE="${{ github.event.inputs.vm_size }}"
+          if [ "$VM_OS" = "none" ]; then CREATE_VM=false; else CREATE_VM=true; fi
+
+          printf 'location = "eastus"\nresource_group_name = "rg-%s-gitcopilot"\ncreate_vm = %s\nvm_os = "%s"\nvm_size = "%s"\n' "$ENV" "$CREATE_VM" "$VM_OS" "$VM_SIZE" > "$ENV_DIR/terraform.tfvars"
+
+          if [ "$VM_OS" = "ubuntu" ] || [ "$VM_OS" = "redhat" ]; then
+            if [ -n "${{ secrets.VM_SSH_PUBLIC_KEY }}" ]; then
+              printf 'vm_ssh_public_key = "%s"\n' "${{ secrets.VM_SSH_PUBLIC_KEY }}" >> "$ENV_DIR/terraform.tfvars"
+            else
+              printf '# WARNING: VM_SSH_PUBLIC_KEY secret not set\n' >> "$ENV_DIR/terraform.tfvars"
+            fi
           fi
 
-          # write terraform.tfvars with correct HCL formatting
-          cat > "$ENV_DIR/terraform.tfvars" <<EOF
-location = "eastus"
-resource_group_name = "rg-${{ inputs.environment }}-gitcopilot"
-create_vm = ${CREATE_VM}
-vm_os = "${{ inputs.vm_os }}"
-vm_size = "${{ inputs.vm_size }}"
-EOF
+          if [ "$VM_OS" = "windows" ]; then
+            if [ -n "${{ secrets.ADMIN_PASSWORD }}" ]; then
+              printf 'vm_admin_password = "%s"\n' "${{ secrets.ADMIN_PASSWORD }}" >> "$ENV_DIR/terraform.tfvars"
+            else
+              printf '# WARNING: ADMIN_PASSWORD secret not set\n' >> "$ENV_DIR/terraform.tfvars"
+            fi
+          fi
 
-      - name: Login to Azure
+      - name: Azure Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Terraform Init
-        run: terraform -chdir="envs/${{ inputs.environment }}" init -backend-config="backend.hcl"
+        run: terraform -chdir="envs/${{ github.event.inputs.environment }}" init -backend-config="backend.hcl"
 
       - name: Terraform Plan
-        if: ${{ inputs.operation == 'plan' || inputs.operation == 'apply' }}
-        run: terraform -chdir="envs/${{ inputs.environment }}" plan -out=tfplan
+        if: ${{ github.event.inputs.operation == 'plan' || github.event.inputs.operation == 'apply' }}
+        run: terraform -chdir="envs/${{ github.event.inputs.environment }}" plan -var-file="terraform.tfvars" -out=tfplan
 
       - name: Terraform Apply
-        if: ${{ inputs.operation == 'apply' }}
+        if: ${{ github.event.inputs.operation == 'apply' }}
         run: |
-          if [ "${{ inputs.auto_approve }}" = "true" ]; then
-            terraform -chdir="envs/${{ inputs.environment }}" apply -auto-approve tfplan
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform -chdir="envs/${{ github.event.inputs.environment }}" apply -auto-approve tfplan
           else
-            terraform -chdir="envs/${{ inputs.environment }}" apply tfplan
+            terraform -chdir="envs/${{ github.event.inputs.environment }}" apply tfplan
           fi
 
       - name: Terraform Destroy
-        if: ${{ inputs.operation == 'destroy' }}
+        if: ${{ github.event.inputs.operation == 'destroy' }}
         run: |
-          if [ "${{ inputs.auto_approve }}" = "true" ]; then
-            terraform -chdir="envs/${{ inputs.environment }}" destroy -auto-approve
+          if [ "${{ github.event.inputs.auto_approve }}" = "true" ]; then
+            terraform -chdir="envs/${{ github.event.inputs.environment }}" destroy -auto-approve -var-file="terraform.tfvars"
           else
-            terraform -chdir="envs/${{ inputs.environment }}" destroy
+            terraform -chdir="envs/${{ github.event.inputs.environment }}" destroy -var-file="terraform.tfvars"
           fi
 name: Terraform
 
