@@ -33,6 +33,19 @@ resource "azurerm_network_interface" "nic" {
   }
 }
 
+resource "azurerm_public_ip" "pip" {
+  count               = var.create_vm ? 1 : 0
+  name                = "pip-${var.vm_name}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  allocation_method   = "Dynamic"
+  sku                 = "Basic"
+}
+
+output "public_ip" {
+  value = try(azurerm_public_ip.pip[0].ip_address, "")
+}
+
 resource "azurerm_linux_virtual_machine" "linux" {
   count               = var.create_vm && var.vm_os != "windows" ? 1 : 0
   name                = var.vm_name
