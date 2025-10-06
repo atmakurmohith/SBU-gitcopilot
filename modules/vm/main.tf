@@ -4,6 +4,7 @@ variable "vm_name" { type = string }
 variable "vm_size" { type = string }
 variable "vm_os" { type = string }
 variable "create_vm" { type = bool }
+variable "subnet_id" { type = string }
 variable "vm_admin_username" {
   type    = string
   default = "azureuser"
@@ -27,15 +28,9 @@ resource "azurerm_network_interface" "nic" {
 
   ip_configuration {
     name                          = "ipconfig"
-    subnet_id                     = data.azurerm_subnet.target[0].id
+    subnet_id                     = var.subnet_id
     private_ip_address_allocation = "Dynamic"
   }
-}
-
-data "azurerm_subnet" "target" {
-  name                 = "spoke-subnet"
-  virtual_network_name = "hub-vnet"
-  resource_group_name  = var.resource_group_name
 }
 
 resource "azurerm_linux_virtual_machine" "linux" {

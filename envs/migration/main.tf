@@ -20,4 +20,5 @@ module "sample_vm" {
   vm_size = var.vm_size
   vm_os = var.vm_os
   create_vm = var.create_vm
+  subnet_id = module.landing_zone_network.spoke_subnet_id
 }
